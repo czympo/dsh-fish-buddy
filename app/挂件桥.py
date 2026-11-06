@@ -236,9 +236,19 @@ class 挂件桥:
 
     @property
     def 在线(self):
-        """当前是否连着服务端。ball.py 和 说() 都靠它判断要不要走桥。"""
+        """当前是否连着服务端。
+
+        ⚠ websockets 12+ 的连接对象没有 `.closed`，只有 `.state`（枚举，OPEN/CLOSED）；
+        老版本反过来只有 `.closed`。这里两种都认，不然一取属性就 AttributeError，
+        被 getattr 默认值吃成 False —— 表现就是「明明连上了却永远说不在线」。
+        """
         连 = self._当前连接
-        return 连 is not None and not 连.closed
+        if 连 is None:
+            return False
+        状态 = getattr(连, 'state', None)
+        if 状态 is not None:
+            return str(状态).upper().endswith('OPEN')
+        return not getattr(连, 'closed', False)
 
     # -- 配置 --------------------------------------------------------
     def _读(self, 键, 默认值=None):
@@ -393,7 +403,7 @@ class 挂件桥:
     async def _发voice(self, 文):
         try:
             等 = getattr(self, '_当前连接', None)
-            if 等 is None:
+            if 等 is None or not self.在线:
                 return
             await 等.send(json.dumps({'type': 'voice', 'text': 文}, ensure_ascii=False))
         except Exception as e:
