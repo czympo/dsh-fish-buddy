@@ -3486,6 +3486,15 @@ class 鱼搭子:
                 self.弹幕框.设状态('')
         except Exception:
             pass
+        # ⭐ 桥：能连上就优先从桥发 —— 旧的 DSH 口子 127.0.0.1:8777 现在没人听，只会报 10061
+        try:
+            if getattr(self, '桥', None) is not None and getattr(self.桥, '在线', False):
+                if self.桥.说(文本):
+                    self.待显示.put(('提示', '· 发过去了'))
+                    self._记电话('送出（桥）：' + str(文本)[:40])
+                    return
+        except Exception as e:
+            记右键('桥上送话失败，退回旧口子：%s' % e)
         端口 = 配置.get('dsh_port', 8777)
         路径 = 配置.get('dsh_path', '/hands/say')
         数据 = json.dumps({'text': 文本, 'session': 配置.get('session') or '',
