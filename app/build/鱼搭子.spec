@@ -41,6 +41,9 @@ hiddenimports = [
     #   但它在 try/except 里，漏掉的话 exe 里就没这个模块，桥会静默不启动。
     '挂件桥',
     'websockets',
+    # 播报用 Edge 神经语音（Xiaoxiao/Yunxi 那类）。edge_tts 是纯 Python，
+    # 它的依赖（aiohttp/websockets）PyInstaller 会自己跟。
+    'edge_tts',
     'sherpa_onnx', 'sounddevice', 'soundcard', 'pycaw', 'pycaw.pycaw',
     'comtypes', 'comtypes.gen', 'proctap', 'onnxruntime',
     'PIL._tkinter_finder',
