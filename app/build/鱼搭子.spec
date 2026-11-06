@@ -36,6 +36,11 @@ binaries += collect_dynamic_libs('onnxruntime')
 hiddenimports = [
     'watch_ui', 'settings', 'models', 'paths', 'version', 'ear',
     'hands', 'hands.voice',
+    # ⭐ 桥：挂件连云端 AstrBot。写在这里是把双保险 ——
+    #   ball.py 里是静态 import，PyInstaller 一般能自己跟上；
+    #   但它在 try/except 里，漏掉的话 exe 里就没这个模块，桥会静默不启动。
+    '挂件桥',
+    'websockets',
     'sherpa_onnx', 'sounddevice', 'soundcard', 'pycaw', 'pycaw.pycaw',
     'comtypes', 'comtypes.gen', 'proctap', 'onnxruntime',
     'PIL._tkinter_finder',
