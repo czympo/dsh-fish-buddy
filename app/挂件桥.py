@@ -33,6 +33,7 @@ import threading
 import time
 
 服务端默认 = 'ws://43.131.225.58:8777/ws'
+版本 = '2026-11-06.2'
 
 # 这些键可以直接写在 config.json 里（设置页不会动它们）；
 # 也可以在 %LOCALAPPDATA%\鱼搭子\桥.json 里单独放一份，键名一样，config.json 优先。
@@ -282,6 +283,7 @@ class 挂件桥:
             return True
         self.线程 = threading.Thread(target=self._跑, name='fish-bridge', daemon=True)
         self.线程.start()
+        self._记('桥：模块版本 %s' % 版本)
         self._记('桥：开始连 %s' % self._地址())
         return True
 
