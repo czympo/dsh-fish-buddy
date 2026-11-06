@@ -3492,8 +3492,8 @@ class 鱼搭子:
             桥 = getattr(self, '桥', None)
             连 = getattr(桥, '_当前连接', None) if 桥 is not None else None
             环 = getattr(桥, '_loop', None) if 桥 is not None else None
-            记右键('桥诊断：桥=%s 连接=%s 事件环=%s' % (桥 is not None, 连 is not None, 环 is not None))
-            if 连 is not None and not 连.closed and 环 is not None:
+            记右键('桥诊断：桥=%s 连接=%s 事件环=%s 在线=%s' % (桥 is not None, 连 is not None, 环 is not None, getattr(桥, '在线', False)))
+            if 环 is not None and getattr(桥, '在线', False):
                 _aio.run_coroutine_threadsafe(桥._发voice(str(文本)), 环)
                 self.待显示.put(('提示', '· 发过去了'))
                 self._记电话('送出（桥）：' + str(文本)[:40])
