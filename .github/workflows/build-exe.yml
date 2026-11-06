@@ -17,29 +17,40 @@ jobs:
       - name: 取代码
         uses: actions/checkout@v4
 
+      # ⚠ 不要加 cache: 'pip' —— 这个仓库没有 requirements.txt / pyproject.toml，
+      #   setup-python 找不到依赖文件会直接报错退出。
       - name: 装 Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           architecture: 'x64'
-          cache: 'pip'
 
       - name: 装依赖
         shell: pwsh
         run: |
           python -m pip install --upgrade pip wheel setuptools
-          # 挂件本体要的（照 spec 里 hiddenimports / collect_* 列的来）
-          python -m pip install `
-            pillow numpy onnxruntime sherpa-onnx `
-            sounddevice soundcard pycaw comtypes proctap `
-            pyinstaller
-          # ⭐ 桥要的 —— 少这一行，打出来的 exe 里没有 websockets，桥会静默不启动
-          python -m pip install websockets
+          $pkgs = @(
+            'pillow', 'numpy', 'onnxruntime', 'sherpa-onnx',
+            'sounddevice', 'soundcard', 'pycaw', 'comtypes',
+            'websockets', 'pyinstaller'
+          )
+          python -m pip install @pkgs
 
-      - name: 自检（缺依赖就早点炸，别等到打完才发现）
+      # ⚠ proctap 不在 PyPI 上（pypi.org/pypi/proctap/json 是 404），仓库里也没带。
+      #   装不上不算失败：spec 里 collect_data_files('proctap') 对缺失的包只会 warning。
+      #   代价是打出来的 exe 里「陪看抓进程声音」那条路可能不可用，其它照常。
+      - name: 试装 proctap（可选）
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          python -m pip install proctap
+          exit 0
+
+      - name: 自检（缺关键依赖就早点炸，别等打完才发现）
         shell: pwsh
         run: |
-          python -c "import sys, PIL, numpy, onnxruntime, sherpa_onnx, sounddevice, pycaw, proctap, websockets, PyInstaller; print('deps ok', sys.version)"
+          python -c "import sys, PIL, numpy, onnxruntime, sherpa_onnx, sounddevice, pycaw, websockets, PyInstaller; print('deps ok', sys.version)"
+          python -c "import importlib.util as u; print('proctap:', 'ok' if u.find_spec('proctap') else '缺失（可接受）')"
 
       - name: 语法自检（改动过的两个文件）
         shell: pwsh
@@ -73,6 +84,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ github.ref_name }}"
-          gh release view $tag 2>$null
+          gh release view $tag
           if ($LASTEXITCODE -ne 0) { gh release create $tag --title $tag --notes "自动构建" }
           gh release upload $tag (Get-ChildItem app/dist/*.exe).FullName --clobber
