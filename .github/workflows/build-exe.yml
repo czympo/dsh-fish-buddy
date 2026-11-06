@@ -37,7 +37,7 @@ jobs:
           $pkgs = @(
             'pillow', 'numpy', 'onnxruntime', 'sherpa-onnx',
             'sounddevice', 'soundcard', 'pycaw', 'comtypes',
-            'websockets', 'pyinstaller'
+            'websockets', 'pyinstaller', 'edge-tts'
           )
           python -m pip install @pkgs
 
@@ -55,7 +55,7 @@ jobs:
         shell: pwsh
         run: |
           # 注意：这里只用 ASCII 打印，别写中文 —— 见上面的 PYTHONIOENCODING 注释
-          python -c "import sys, PIL, numpy, onnxruntime, sherpa_onnx, sounddevice, pycaw, websockets, PyInstaller; print('deps ok', sys.version)"
+          python -c "import sys, PIL, numpy, onnxruntime, sherpa_onnx, sounddevice, pycaw, websockets, edge_tts, PyInstaller; print('deps ok', sys.version)"
           python -c "import importlib.util as u; print('proctap:', 'ok' if u.find_spec('proctap') else 'MISSING (optional)')"
 
       - name: 语法自检（改动过的两个文件）
@@ -83,13 +83,17 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: 打标签时顺手上传到 Release
-        if: startsWith(github.ref, 'refs/tags/v')
+      # ⚠ artifact 只能登录后在网页点，下载直链要跳转、还 30 天过期。
+      #   所以再发一份到 Release：latest-build 是固定 tag，每次跑都覆盖，
+      #   链接永远是 /releases/download/latest-build/鱼搭子.exe，可以直接 curl。
+      - name: 发布到 Release（latest-build）
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = 'latest-build'
           gh release view $tag
-          if ($LASTEXITCODE -ne 0) { gh release create $tag --title $tag --notes "自动构建" }
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title '最新构建' --notes '每次手动触发自动更新；下载下面的 鱼搭子.exe 就是最新一版。'
+          }
           gh release upload $tag (Get-ChildItem app/dist/*.exe).FullName --clobber
