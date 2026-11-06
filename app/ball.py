@@ -1100,6 +1100,14 @@ class 鱼搭子:
                 self._重试回话口(口, 8)
         except Exception as e:
             self.待显示.put(('提示', '回话口没起来：%s' % e))
+        # ---- 桥：连云端 AstrBot（纯出站，断了自己在后台重连，界面上一行都不出）----
+        self.桥 = None
+        try:
+            import 挂件桥
+            self.桥 = 挂件桥.挂件桥(self, 配置, 记右键)
+            self.桥.启动()
+        except Exception as e:
+            记右键('桥没起来：%s' % e)
         self._拖动起点 = None
         self._拖过 = False
         self._建Tk浮窗(x, y)
@@ -3650,6 +3658,11 @@ class 鱼搭子:
         try:
             if getattr(self, '回话口', None):
                 self.回话口.停()
+        except Exception:
+            pass
+        try:
+            if getattr(self, '桥', None):
+                self.桥.停()
         except Exception:
             pass
         self._挂断()

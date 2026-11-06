@@ -1,0 +1,364 @@
+"""鱼搭子 ↔ AstrBot 桥（挂件侧）
+
+方向：电脑主动出站连服务器 `ws://<ip>:8777/ws`，不开任何入站口、不动路由器。
+
+它只做四件事，全在后台线程里，界面上一行都看不到（出问题只写右键日志）：
+    speak       → 塞进主窗的「待显示」队列（和插件递回话走同一条路：普通模式冒气泡、
+                  游戏模式走弹幕），可选再用系统 TTS 念出来
+    screenshot  → 复用主窗现成的 _拍一张给插件()（1280 宽、q75 JPEG）
+    game_state  → 前台窗口标题 + 进程名 + 游戏模式开没开
+    心跳/重连   → 断了就指数退避静默重连（1→2→4…30 秒封顶）
+
+明确不做：键鼠控制、远程执行命令、读文件系统。收到的 speak **只显示/播报，不回灌模型**。
+
+⚠ 依赖：`websockets`（`pip install websockets`）。没装的话桥直接不启动，
+   挂件其它功能一切照旧 —— 只在右键日志里留一行。
+
+接入（ball.py 里加 6 行，见同目录「接入说明.md」）：
+
+    self.桥 = None
+    try:
+        import 挂件桥
+        self.桥 = 挂件桥.挂件桥(self, 配置, 记右键)
+        self.桥.启动()
+    except Exception as e:
+        记右键('桥没起来：%s' % e)
+"""
+from __future__ import annotations
+
+import base64
+import json
+import os
+import threading
+import time
+
+服务端默认 = 'ws://43.131.225.58:8777/ws'
+
+# 这些键可以直接写在 config.json 里（设置页不会动它们）；
+# 也可以在 %LOCALAPPDATA%\鱼搭子\桥.json 里单独放一份，键名一样，config.json 优先。
+默认 = {
+    '桥开': True,
+    '桥地址': 服务端默认,
+    '桥口令': '',
+    '桥语音播报': False,   # 真·念出声（走系统自带 TTS，零依赖）
+    '桥语音语速': 0,        # -10～10，0 是正常
+}
+
+
+# ---------------------------------------------------------------- 前台窗口
+
+def _前台窗口标题():
+    """取前台窗口标题。注意 64 位下 HWND 不能当 int 收，必须先声明签名。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        u = ctypes.windll.user32
+        u.GetForegroundWindow.restype = wintypes.HWND
+        u.GetForegroundWindow.argtypes = []
+        h = u.GetForegroundWindow()
+        if not h:
+            return ''
+        u.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        u.GetWindowTextLengthW.restype = ctypes.c_int
+        n = u.GetWindowTextLengthW(h)
+        if n <= 0:
+            return ''
+        buf = ctypes.create_unicode_buffer(n + 1)
+        u.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        u.GetWindowTextW(h, buf, n + 1)
+        return buf.value.strip()
+    except Exception:
+        return ''
+
+
+def _前台进程名():
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        u = ctypes.windll.user32
+        k = ctypes.windll.kernel32
+        u.GetForegroundWindow.restype = wintypes.HWND
+        h = u.GetForegroundWindow()
+        if not h:
+            return ''
+        pid = wintypes.DWORD()
+        u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        u.GetWindowThreadProcessId(h, ctypes.byref(pid))
+        if not pid.value:
+            return ''
+        k.OpenProcess.restype = wintypes.HANDLE
+        k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        ph = k.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not ph:
+            return ''
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            k.QueryFullProcessImageNameW.argtypes = [
+                wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+            ]
+            k.QueryFullProcessImageNameW.restype = wintypes.BOOL
+            if k.QueryFullProcessImageNameW(ph, 0, buf, ctypes.byref(size)):
+                return os.path.basename(buf.value)
+        finally:
+            try:
+                k.CloseHandle(ph)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return ''
+
+
+# ---------------------------------------------------------------- TTS
+
+def _念出声(文, 语速=0):
+    """用 Windows 自带的 System.Speech 念一句 —— 不装任何东西。
+
+    文本走 base64 传，避开 PowerShell 的编码坑（中文直接走 stdin 会变问号）。
+    """
+    try:
+        import subprocess
+
+        b64 = base64.b64encode(str(文).encode('utf-8')).decode('ascii')
+        脚本 = (
+            'Add-Type -AssemblyName System.Speech;'
+            '$t=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(\'%s\'));'
+            '$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;'
+            '$s.Rate=%d;'
+            '$s.Speak($t);'
+            '$s.Dispose()' % (b64, int(语速))
+        )
+        subprocess.run(
+            ['powershell', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', 脚本],
+            timeout=120,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+            capture_output=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------- 桥
+
+class 挂件桥:
+    def __init__(self, 主窗, 配置=None, 记=None):
+        self.主窗 = 主窗
+        self.配置源 = 配置 if isinstance(配置, dict) else {}
+        self._记 = 记 if callable(记) else (lambda s: None)
+        self.想停 = threading.Event()
+        self.线程 = None
+        self.连上过 = False
+        self.最近错误 = ''
+        self.收到播报 = 0
+        self.收到命令 = 0
+        self._当前连接 = None
+
+    # -- 配置 --------------------------------------------------------
+    def _读(self, 键, 默认值=None):
+        值 = self.配置源.get(键)
+        if 值 not in (None, ''):
+            return 值
+        # 退路：%LOCALAPPDATA%\鱼搭子\桥.json
+        try:
+            import paths
+            路 = os.path.join(paths.用户目录(), '桥.json')
+            if os.path.exists(路):
+                with open(路, 'r', encoding='utf-8') as f:
+                    另 = json.load(f) or {}
+                if 键 in 另 and 另[键] not in (None, ''):
+                    return 另[键]
+        except Exception:
+            pass
+        return 默认值 if 默认值 is not None else 默认.get(键)
+
+    def _地址(self):
+        a = str(self._读('桥地址', 服务端默认) or 服务端默认).strip()
+        if not a.startswith(('ws://', 'wss://')):
+            a = 'ws://' + a
+        if not a.rstrip('/').endswith('/ws'):
+            a = a.rstrip('/') + '/ws'
+        return a
+
+    # -- 起停 --------------------------------------------------------
+    def 启动(self):
+        if not bool(self._读('桥开', True)):
+            self._记('桥：配置里关着，不起')
+            return False
+        if not str(self._读('桥口令', '') or '').strip():
+            self._记('桥：没填口令（桥口令），不起')
+            return False
+        try:
+            import websockets  # noqa: F401
+        except Exception:
+            self._记('桥：没装 websockets，不起（pip install websockets）')
+            return False
+        if self.线程 is not None:
+            return True
+        self.线程 = threading.Thread(target=self._跑, name='fish-bridge', daemon=True)
+        self.线程.start()
+        self._记('桥：开始连 %s' % self._地址())
+        return True
+
+    def 停(self):
+        self.想停.set()
+
+    def 状态(self):
+        return {
+            '连上': self.连上过,
+            '地址': self._地址(),
+            '播报': self.收到播报,
+            '命令': self.收到命令,
+            '最近错误': self.最近错误,
+        }
+
+    # -- 主循环 ------------------------------------------------------
+    def _跑(self):
+        try:
+            import asyncio
+
+            asyncio.run(self._主循环())
+        except Exception as e:
+            self._记('桥：线程挂了（%s）' % e)
+
+    async def _主循环(self):
+        import asyncio
+
+        import websockets
+
+        退 = 1.0
+        while not self.想停.is_set():
+            try:
+                # ping_interval=None：心跳由服务端发（它每 30 秒 ping 一次），
+                # websockets 库会自动回 pong，我们不用自己写。
+                async with websockets.connect(
+                    self._地址(), ping_interval=None, max_size=16 * 1024 * 1024, open_timeout=10
+                ) as ws:
+                    await ws.send(json.dumps(
+                        {'type': 'hello', 'token': str(self._读('桥口令', '') or '')},
+                        ensure_ascii=False,
+                    ))
+                    self.连上过 = True
+                    self.最近错误 = ''
+                    退 = 1.0
+                    self._当前连接 = ws
+                    self._记('桥：连上了')
+                    async for 原 in ws:
+                        try:
+                            await self._收(json.loads(原))
+                        except Exception as e:
+                            self._记('桥：这条收不了（%s）' % e)
+                    self._当前连接 = None
+            except Exception as e:
+                self.最近错误 = '%s' % e
+                # ⚠ 静默：只写日志，绝不往界面上弹
+                self._记('桥：断了（%s），%.0f 秒后重连' % (e, 退))
+            self.连上过 = False
+            if self.想停.is_set():
+                break
+            await asyncio.sleep(退)
+            退 = min(退 * 2.0, 30.0)
+
+    # -- 收包 --------------------------------------------------------
+    async def _收(self, 包):
+        t = 包.get('type')
+        if t == 'welcome':
+            self._记('桥：服务端问好（%s）' % (包.get('server') or '?'))
+            return
+        if t == 'speak':
+            文 = str(包.get('text') or '').strip()
+            if not 文:
+                return
+            self.收到播报 += 1
+            self._显示(文)
+            return
+        if t == 'cmd':
+            self.收到命令 += 1
+            命令 = str(包.get('cmd') or '')
+            号 = 包.get('id')
+            # 截图/取状态是同步的（几百毫秒），丢到线程池里跑，别堵住接收循环
+            try:
+                import asyncio
+
+                结果 = await asyncio.get_running_loop().run_in_executor(None, self._干活, 命令)
+            except Exception as e:
+                结果 = {'ok': False, 'msg': '干不了：%s' % e}
+            结果['type'] = 'result'
+            结果['id'] = 号
+            await self._发(结果)
+            return
+        # 其它一律忽略（心跳、未知类型）
+
+    async def _发(self, 包):
+        try:
+            等 = getattr(self, '_当前连接', None)
+            if 等 is None:
+                return
+            await 等.send(json.dumps(包, ensure_ascii=False))
+        except Exception as e:
+            self.最近错误 = '回包失败：%s' % e
+
+    # -- 干活 --------------------------------------------------------
+    def _干活(self, 命令):
+        if 命令 == 'screenshot':
+            return self._截图()
+        if 命令 == 'game_state':
+            return self._游戏状态()
+        return {'ok': False, 'msg': '不认识的命令：%s' % (命令 or '空')}
+
+    def _截图(self):
+        """复用主窗现成的「拍一张给插件」：它已经缩到 1280 宽、压成 q75 JPEG。"""
+        拍 = getattr(self.主窗, '_拍一张给插件', None)
+        if not callable(拍):
+            return {'ok': False, 'msg': '这个版本的挂件还不能截图'}
+        try:
+            结果 = 拍()
+        except Exception as e:
+            return {'ok': False, 'msg': '拍不了：%s' % e}
+        if not 结果:
+            return {'ok': False, 'msg': '这一下没抓到画面'}
+        try:
+            字节, 尺寸 = 结果
+            return {
+                'ok': True,
+                'data': {
+                    'image': base64.b64encode(字节).decode('ascii'),
+                    'size': '%dx%d' % (尺寸[0], 尺寸[1]),
+                    'title': _前台窗口标题(),
+                },
+            }
+        except Exception as e:
+            return {'ok': False, 'msg': '收拾不了这张图：%s' % e}
+
+    def _游戏状态(self):
+        return {
+            'ok': True,
+            'data': {
+                '前台': _前台进程名() or '未知',
+                '窗口': _前台窗口标题(),
+                '游戏': bool(getattr(self.主窗, '游戏模式', False)),
+            },
+        }
+
+    # -- 播报 --------------------------------------------------------
+    def _显示(self, 文):
+        """塞进主窗的待显示队列 —— 跟插件递回话是同一条路，气泡/弹幕都归它管。"""
+        try:
+            q = getattr(self.主窗, '待显示', None)
+            if q is not None:
+                q.put(('回复', 文))
+        except Exception as e:
+            self._记('桥：显示不了（%s）' % e)
+        if bool(self._读('桥语音播报', False)):
+            try:
+                threading.Thread(
+                    target=_念出声,
+                    args=(文, self._读('桥语音语速', 0) or 0),
+                    name='fish-bridge-tts',
+                    daemon=True,
+                ).start()
+            except Exception:
+                pass
