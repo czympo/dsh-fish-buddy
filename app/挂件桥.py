@@ -33,7 +33,7 @@ import threading
 import time
 
 服务端默认 = 'ws://43.131.225.58:8777/ws'
-版本 = '2026-11-06.2'
+版本 = '2026-11-06.3'
 
 # 这些键可以直接写在 config.json 里（设置页不会动它们）；
 # 也可以在 %LOCALAPPDATA%\鱼搭子\桥.json 里单独放一份，键名一样，config.json 优先。
@@ -233,22 +233,18 @@ class 挂件桥:
         self.收到命令 = 0
         self._当前连接 = None
         self._loop = None
+        self._连着 = False
 
     @property
     def 在线(self):
         """当前是否连着服务端。
 
-        ⚠ websockets 12+ 的连接对象没有 `.closed`，只有 `.state`（枚举，OPEN/CLOSED）；
-        老版本反过来只有 `.closed`。这里两种都认，不然一取属性就 AttributeError，
-        被 getattr 默认值吃成 False —— 表现就是「明明连上了却永远说不在线」。
+        ⚠ 不查库的 `.closed` / `.state` —— 这两个在 websockets 各版本里变过：
+        老版只有 `.closed`；12+ 只有 `.state`；而 `.state` 是 IntEnum，
+        Python 3.11 起 `str(State.OPEN)` 返回 `'1'` 而不是 `'OPEN'`。
+        所以改成**自己记一个标志**，在连接建立/断开处更新，跟库版本无关。
         """
-        连 = self._当前连接
-        if 连 is None:
-            return False
-        状态 = getattr(连, 'state', None)
-        if 状态 is not None:
-            return str(状态).upper().endswith('OPEN')
-        return not getattr(连, 'closed', False)
+        return bool(getattr(self, '_连着', False)) and self._当前连接 is not None
 
     # -- 配置 --------------------------------------------------------
     def _读(self, 键, 默认值=None):
@@ -340,6 +336,7 @@ class 挂件桥:
                     self.最近错误 = ''
                     退 = 1.0
                     self._当前连接 = ws
+                    self._连着 = True
                     self._记('桥：连上了')
                     async for 原 in ws:
                         try:
@@ -347,11 +344,13 @@ class 挂件桥:
                         except Exception as e:
                             self._记('桥：这条收不了（%s）' % e)
                     self._当前连接 = None
+                    self._连着 = False
             except Exception as e:
                 self.最近错误 = '%s' % e
                 # ⚠ 静默：只写日志，绝不往界面上弹
                 self._记('桥：断了（%s），%.0f 秒后重连' % (e, 退))
             self.连上过 = False
+            self._连着 = False
             if self.想停.is_set():
                 break
             await asyncio.sleep(退)
