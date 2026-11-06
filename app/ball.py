@@ -3486,15 +3486,20 @@ class 鱼搭子:
                 self.弹幕框.设状态('')
         except Exception:
             pass
-        # ⭐ 桥：能连上就优先从桥发 —— 旧的 DSH 口子 127.0.0.1:8777 现在没人听，只会报 10061
+        # ⭐ 桥：优先从 WS 发（旧的 DSH 口子 127.0.0.1:8777 没人听，只会报 10061）
         try:
-            if getattr(self, '桥', None) is not None and getattr(self.桥, '在线', False):
-                if self.桥.说(文本):
-                    self.待显示.put(('提示', '· 发过去了'))
-                    self._记电话('送出（桥）：' + str(文本)[:40])
-                    return
+            import asyncio as _aio
+            桥 = getattr(self, '桥', None)
+            连 = getattr(桥, '_当前连接', None) if 桥 is not None else None
+            环 = getattr(桥, '_loop', None) if 桥 is not None else None
+            记右键('桥诊断：桥=%s 连接=%s 事件环=%s' % (桥 is not None, 连 is not None, 环 is not None))
+            if 连 is not None and not 连.closed and 环 is not None:
+                _aio.run_coroutine_threadsafe(桥._发voice(str(文本)), 环)
+                self.待显示.put(('提示', '· 发过去了'))
+                self._记电话('送出（桥）：' + str(文本)[:40])
+                return
         except Exception as e:
-            记右键('桥上送话失败，退回旧口子：%s' % e)
+            记右键('桥送话失败：%s' % e)
         端口 = 配置.get('dsh_port', 8777)
         路径 = 配置.get('dsh_path', '/hands/say')
         数据 = json.dumps({'text': 文本, 'session': 配置.get('session') or '',
