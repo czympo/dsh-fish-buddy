@@ -233,6 +233,12 @@ class 挂件桥:
         self._当前连接 = None
         self._loop = None
 
+    @property
+    def 在线(self):
+        """当前是否连着服务端。ball.py 和 说() 都靠它判断要不要走桥。"""
+        连 = self._当前连接
+        return 连 is not None and not 连.closed
+
     # -- 配置 --------------------------------------------------------
     def _读(self, 键, 默认值=None):
         值 = self.配置源.get(键)
