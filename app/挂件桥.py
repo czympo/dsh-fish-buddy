@@ -40,8 +40,9 @@ import time
     '桥开': True,
     '桥地址': 服务端默认,
     '桥口令': '',
-    '桥语音播报': False,   # 真·念出声（走系统自带 TTS，零依赖）
+    '桥语音播报': False,   # 真·念出声
     '桥语音语速': 0,        # -10～10，0 是正常
+    '桥音色': '',           # 留空 = 自动挑（优先自然语音，如 Xiaoxiao）；也可填 "Xiaoxiao" / "Kangkang"
 }
 
 
@@ -113,34 +114,108 @@ def _前台进程名():
 
 
 # ---------------------------------------------------------------- TTS
+#
+# 用 Edge 的在线神经语音（edge-tts）：zh-CN-XiaoxiaoNeural / YunxiNeural 这一套，
+# 比 Windows 自带的系统语音好听一个档次。
+#
+# 为什么不用系统语音：
+#   · SAPI5（Huihui Desktop）是 2009 年的老库，机器味很重
+#   · Windows「自然语音」得自己进设置里装，这台机器上没装
+#   · 手写 Edge 的 WebSocket 协议也不行：微软的反滥用校验会 403
+#     （Origin / UA / Sec-MS-GEC 都带对了照样 403），只有持续维护的库能跟上
+#
+# 所以：把 edge-tts 打进 exe（PyInstaller 的 hiddenimports 里加 edge_tts），
+# 合成在本机做（走家庭网络，比云服务器 IP 更不容易被限），
+# 播放用 winmm 的 MCI（纯 ctypes，不再引播放依赖）。
 
-def _念出声(文, 语速=0):
-    """用 Windows 自带的 System.Speech 念一句 —— 不装任何东西。
+_TTS_锁 = threading.Lock()   # 串行播放，免得多句叠在一起
+_默认音色 = 'zh-CN-XiaoxiaoNeural'
 
-    文本走 base64 传，避开 PowerShell 的编码坑（中文直接走 stdin 会变问号）。
-    """
+
+def _音色全名(名):
+    """允许填简写：Xiaoxiao → zh-CN-XiaoxiaoNeural；填全名就原样用。"""
+    名 = str(名 or '').strip()
+    if not 名:
+        return _默认音色
+    if '-' in 名:
+        return 名
+    return 'zh-CN-%sNeural' % 名
+
+
+def _播放mp3(路径):
+    """用 winmm 的 MCI 播 mp3，同步等到放完。纯 ctypes。"""
     try:
-        import subprocess
+        import ctypes
+        from ctypes import wintypes
 
-        b64 = base64.b64encode(str(文).encode('utf-8')).decode('ascii')
-        脚本 = (
-            'Add-Type -AssemblyName System.Speech;'
-            '$t=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(\'%s\'));'
-            '$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;'
-            '$s.Rate=%d;'
-            '$s.Speak($t);'
-            '$s.Dispose()' % (b64, int(语速))
-        )
-        subprocess.run(
-            ['powershell', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', 脚本],
-            timeout=120,
-            creationflags=0x08000000,  # CREATE_NO_WINDOW
-            capture_output=True,
-        )
+        mci = ctypes.WinDLL('winmm')
+        buf = ctypes.create_unicode_buffer(512)
+        mci.mciSendStringW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.UINT, wintypes.HWND]
+        mci.mciSendStringW.restype = wintypes.DWORD
+
+        def 命令(文):
+            return mci.mciSendStringW(文, buf, 512, None)
+
+        alias = 'fishbridge'
+        命令('close %s' % alias)
+        码 = 命令('open "%s" type mpegvideo alias %s' % (路径, alias))
+        if 码 != 0:
+            # 某些机器上 mpegvideo 类型名不对，退回让系统自己认
+            码 = 命令('open "%s" alias %s' % (路径, alias))
+        if 码 != 0:
+            return False
+        命令('play %s wait' % alias)
+        命令('close %s' % alias)
         return True
     except Exception:
         return False
 
+
+async def _合成edge(文, 音色, 语速):
+    """合成一段 mp3，返回 (字节, 实际用的音色名)。"""
+    import edge_tts
+
+    # edge-tts 的 rate 是 "+20%" 这种写法；语速 -10～10 映射到 -50%～+50%
+    百分比 = max(-50, min(50, int(语速 or 0) * 3))
+    速 = '%+d%%' % 百分比
+    声 = _音色全名(音色)
+    缓冲 = bytearray()
+    async for 块 in edge_tts.Communicate(文, 声, rate=速).stream():
+        if 块.get('type') == 'audio' and 块.get('data'):
+            缓冲.extend(块['data'])
+    return bytes(缓冲), 声
+
+
+def _念出声(文, 语速=0, 音色=''):
+    """念一句：本地合成 → 临时 mp3 → 播完删掉。整个播放串行（加锁）。"""
+    文 = str(文 or '').strip()
+    if not 文:
+        return False
+    with _TTS_锁:
+        try:
+            import asyncio
+            import tempfile
+
+            try:
+                import edge_tts  # noqa: F401
+            except Exception:
+                return False
+
+            音频, _声 = asyncio.run(_合成edge(文, 音色, 语速))
+            if len(音频) < 2000:
+                return False
+            路径 = os.path.join(tempfile.gettempdir(), 'fish-tts-%d.mp3' % int(time.time() * 1000))
+            with open(路径, 'wb') as f:
+                f.write(音频)
+            try:
+                return _播放mp3(路径)
+            finally:
+                try:
+                    os.remove(路径)
+                except Exception:
+                    pass
+        except Exception:
+            return False
 
 # ---------------------------------------------------------------- 桥
 
@@ -356,7 +431,7 @@ class 挂件桥:
             try:
                 threading.Thread(
                     target=_念出声,
-                    args=(文, self._读('桥语音语速', 0) or 0),
+                    args=(文, self._读('桥语音语速', 0) or 0, str(self._读('桥音色', '') or '')),
                     name='fish-bridge-tts',
                     daemon=True,
                 ).start()
