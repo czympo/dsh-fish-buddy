@@ -13,6 +13,11 @@ permissions:
 jobs:
   windows-exe:
     runs-on: windows-latest
+    # ⚠ 必须给 UTF-8：runner 的控制台是 cp437/cp1252，Python 一 print 中文就
+    #   UnicodeEncodeError: 'charmap' codec ... 直接退出码 1（第一轮就是这么挂的）。
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
     steps:
       - name: 取代码
         uses: actions/checkout@v4
@@ -49,8 +54,9 @@ jobs:
       - name: 自检（缺关键依赖就早点炸，别等打完才发现）
         shell: pwsh
         run: |
+          # 注意：这里只用 ASCII 打印，别写中文 —— 见上面的 PYTHONIOENCODING 注释
           python -c "import sys, PIL, numpy, onnxruntime, sherpa_onnx, sounddevice, pycaw, websockets, PyInstaller; print('deps ok', sys.version)"
-          python -c "import importlib.util as u; print('proctap:', 'ok' if u.find_spec('proctap') else '缺失（可接受）')"
+          python -c "import importlib.util as u; print('proctap:', 'ok' if u.find_spec('proctap') else 'MISSING (optional)')"
 
       - name: 语法自检（改动过的两个文件）
         shell: pwsh
