@@ -231,6 +231,7 @@ class 挂件桥:
         self.收到播报 = 0
         self.收到命令 = 0
         self._当前连接 = None
+        self._loop = None
 
     # -- 配置 --------------------------------------------------------
     def _读(self, 键, 默认值=None):
@@ -304,6 +305,7 @@ class 挂件桥:
 
         import websockets
 
+        self._loop = asyncio.get_running_loop()
         退 = 1.0
         while not self.想停.is_set():
             try:
@@ -366,6 +368,28 @@ class 挂件桥:
             await self._发(结果)
             return
         # 其它一律忽略（心跳、未知类型）
+
+    def 说(self, 文本):
+        """把一句话送给服务端（当成主人说的）。True = 已经排进发送队列。"""
+        文 = str(文本 or '').strip()
+        if not 文 or not self.在线 or self._loop is None:
+            return False
+        try:
+            import asyncio
+
+            asyncio.run_coroutine_threadsafe(self._发voice(文), self._loop)
+            return True
+        except Exception:
+            return False
+
+    async def _发voice(self, 文):
+        try:
+            等 = getattr(self, '_当前连接', None)
+            if 等 is None:
+                return
+            await 等.send(json.dumps({'type': 'voice', 'text': 文}, ensure_ascii=False))
+        except Exception as e:
+            self.最近错误 = '送话失败：%s' % e
 
     async def _发(self, 包):
         try:
